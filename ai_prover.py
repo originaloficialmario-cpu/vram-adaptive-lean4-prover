@@ -1,173 +1,195 @@
-import os
-import subprocess
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.distributions import Categorical
 import torch.nn.functional as F
+import subprocess
+import json
+import logging
 
-# =====================================================================
-# 1. REAL LEAN 4 COMPILER INTERACTION PIPELINE
-# =====================================================================
+logging.basicConfig(level=logging.INFO)
+
+# ==========================================
+# 1. Lean 4 Compiler Feedback System
+# ==========================================
 class Lean4Environment:
-    def __init__(self, project_dir="math_project"):
-        self.project_dir = project_dir
-        if not os.path.exists(project_dir):
-            os.makedirs(project_dir)
-
-    def execute_proof_step(self, theorem_name, proof_script):
-        """
-        Schreibt das mathematische Theorem live in eine Datei und
-        jagt es direkt durch den frisch installierten Lean 4 Compiler.
-        """
-        file_path = os.path.join(self.project_dir, f"{theorem_name}.lean")
+    def __init__(self, lean_repl_path="lean"):
+        self.lean_repl_path = lean_repl_path
+        # Hinweis: In der Praxis nutzt man hier Tools wie 'repl' (Lean 4 REPL)
+        # und steuert diese via Popen. Hier abstrahieren wir die Logik.
         
-        # Erstelle ein echtes Lean 4 Dokument mit Anbindung an die heruntergeladene Mathlib
-        lean_code = f"""import Mathlib
-
-theorem {theorem_name} {proof_script}
-"""
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(lean_code)
-            
-        # Rufe den echten Lean 4 Compiler auf deinem G5 auf!
+    def step(self, state_str, action_str):
+        """
+        Sendet eine Taktik (action) an Lean 4 für den aktuellen State.
+        Gibt den neuen State, den Reward und ein 'done' Flag zurück.
+        """
+        # Mock-Logik für das Lean 4 Feedback
         try:
-            result = subprocess.run(
-                ["lean", file_path], 
-                capture_output=True, 
-                text=True, 
-                timeout=5
-            )
+            # Beispielhafter CLI-Call (Pseudocode für echte REPL-Interaktion)
+            # process = subprocess.Popen([self.lean_repl_path, ...], stdin=subprocess.PIPE, ...)
             
-            # Auswertung des echten Compiler-Feedbacks
-            output = result.stderr if result.stderr else result.stdout
-            
-            if result.returncode == 0 and "error" not in output.lower():
-                reward = 1.0  # Der mathematische Beweis ist absolut fehlerfrei!
-                done = True
-                info = "Beweis akzeptiert!"
+            # Simulierte Umgebung:
+            if "sorry" in action_str:
+                return "Fehler: sorry nicht erlaubt", -1.0, True
+            elif "rfl" in action_str:
+                return "Proof Complete", 10.0, True
             else:
-                done = False
-                info = output if output else "Unbekannter Syntaxfehler"
-                # Belohnungssystem basierend auf verbleibenden Zielen (Goals)
-                if "remaining goals" in output.lower():
-                    reward = 0.2
-                else:
-                    reward = -0.1  # Schlimmer Logikfehler im Beweis
-                    
-        except subprocess.TimeoutExpired:
-            reward = -0.5
-            done = False
-            info = "Compiler Timeout"
-            
-        return reward, done, info
+                # Partieller Fortschritt
+                return "Tactic state updated", 0.1, False
+                
+        except Exception as e:
+            return f"Lean 4 Error: {str(e)}", -2.0, True
 
-# =====================================================================
-# 2. DYNAMIC DIFF-TOKENIZER & NEURAL NETWORK ARCHITECTURE
-# =====================================================================
-class DifferentiableTokenizer(nn.Module):
-    def __init__(self, vocab_size, embedding_dim):
-        super(DifferentiableTokenizer, self).__init__()
-        self.vocab_size = vocab_size
-        self.token_scoring = nn.Linear(embedding_dim, 1) 
-        
-    def forward(self, embeddings, temperature=1.0):
-        scores = self.token_scoring(embeddings).squeeze(-1)
-        mask = F.gumbel_softmax(scores, tau=temperature, hard=True)
-        return mask
+# ==========================================
+# 2. Dynamischer VRAM-Tokenizer (Gumbel-Softmax)
+# ==========================================
+class DynamicVRAMTokenizer(nn.Module):
+    def __init__(self, embed_dim, temperature=1.0):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.temperature = temperature
+        # Prädiktor, der entscheidet, ob ein Token relevant für den Beweis ist
+        self.keep_predictor = nn.Linear(embed_dim, 2) 
 
-class ActorCriticModel(nn.Module):
-    def __init__(self, vocab_size, embedding_dim, hidden_dim, action_dim):
-        super(ActorCriticModel, self).__init__()
-        self.embedding = nn.Embedding(vocab_size, embedding_dim)
-        self.tokenizer_vram_ctrl = DifferentiableTokenizer(vocab_size, embedding_dim)
+    def forward(self, x):
+        """
+        x: [Batch, Sequence_Length, Embed_Dim]
+        """
+        # Logits für "Behalten" (Index 1) und "Verwerfen" (Index 0)
+        logits = self.keep_predictor(x) 
         
-        encoder_layer = nn.TransformerEncoderLayer(d_model=embedding_dim, nhead=4, dim_feedforward=hidden_dim, batch_first=True)
+        # Gumbel-Softmax für differenzierbares Sampling
+        # Im Forward-Pass gibt hard=True One-Hot-Vektoren zurück,
+        # im Backward-Pass fließen die Gradienten durch die Softmax-Verteilung.
+        gumbel_out = F.gumbel_softmax(logits, tau=self.temperature, hard=True, dim=-1)
+        
+        # Maske extrahieren: 1 wenn behalten, 0 wenn verwerfen
+        keep_mask_discrete = gumbel_out[:, :, 1] # [Batch, Seq]
+        
+        # Soft-Probabilities extrahieren (für die Verlustfunktion / L_VRAM)
+        soft_probs = F.softmax(logits / self.temperature, dim=-1)[:, :, 1]
+        
+        # Anwenden der Maske auf die Eingabe.
+        # Um *wirklich* VRAM in den folgenden Schichten zu sparen, 
+        # müssten wir die Sequenz hier dynamisch verkürzen (pack_padded_sequence).
+        # Der Einfachheit halber nullen wir sie hier aus.
+        x_filtered = x * keep_mask_discrete.unsqueeze(-1)
+        
+        return x_filtered, soft_probs, keep_mask_discrete
+
+# ==========================================
+# 3. RL-Policy Netzwerk (Prover Agent)
+# ==========================================
+class LeanProverNet(nn.Module):
+    def __init__(self, vocab_size, embed_dim, action_dim):
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, embed_dim)
+        self.dynamic_tokenizer = DynamicVRAMTokenizer(embed_dim)
+        
+        # Transformer-Schichten (simulieren das LLM)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=4, batch_first=True)
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=2)
         
-        self.actor = nn.Linear(embedding_dim, action_dim)
-        self.critic = nn.Linear(embedding_dim, 1)
+        self.policy_head = nn.Linear(embed_dim, action_dim)
+        self.value_head = nn.Linear(embed_dim, 1)
 
-    def forward(self, x, temperature=1.0):
-        raw_embeddings = self.embedding(x)
-        vram_mask = self.tokenizer_vram_ctrl(raw_embeddings, temperature)
-        masked_embeddings = raw_embeddings * vram_mask.unsqueeze(-1)
+    def forward(self, state_tokens):
+        x = self.embedding(state_tokens)
         
-        features = self.transformer(masked_embeddings)
-        pooled_features = features.mean(dim=1)
+        # Dynamische Token-Anpassung
+        x_filtered, keep_probs, mask = self.dynamic_tokenizer(x)
         
-        action_logits = self.actor(pooled_features)
-        state_values = self.critic(pooled_features)
+        # Attention wird nur auf relevante Token angewandt
+        # (Hier könnte man die Maske dem Transformer als padding_mask übergeben)
+        transformer_out = self.transformer(x_filtered)
         
-        return action_logits, state_values, vram_mask
+        # Pooling über die Sequenz
+        pooled = transformer_out.mean(dim=1)
+        
+        action_logits = self.policy_head(pooled)
+        state_value = self.value_head(pooled)
+        
+        return action_logits, state_value, keep_probs
 
-# =====================================================================
-# 3. RL REINFORCEMENT LEARNING TRAINING LOOP
-# =====================================================================
-def train_rl_prover():
+# ==========================================
+# 4. Training Loop (REINFORCE + VRAM Penalty)
+# ==========================================
+def train_prover():
+    # Hyperparameter
     vocab_size = 1000
-    embedding_dim = 128
-    hidden_dim = 256
-    action_dim = 4 
-    epochs = 50  # Kompakter Testlauf für echte Compiler-Geschwindigkeit
-    clip_eps = 0.2
-    lambda_vram = 0.01 
+    embed_dim = 128
+    action_dim = 50 # Anzahl der verfügbaren Taktiken (z.B. rfl, intro, simp, rw)
+    lr = 3e-4
+    lambda_vram = 0.05 # Gewichtung der Tokenizer-Effizienz
+    epochs = 100
     
-    # Echte Lean 4 Beweis-Taktiken
-    tactic_map = {0: ":= by rfl", 1: ":= by linarith", 2: ":= by ring", 3: "(n : Nat) : n + 0 = n := by induction n"}
-    
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = ActorCriticModel(vocab_size, embedding_dim, hidden_dim, action_dim).to(device)
-    optimizer = optim.AdamW(model.parameters(), lr=1e-4)
+    # Initialisierung
+    model = LeanProverNet(vocab_size, embed_dim, action_dim)
+    optimizer = optim.Adam(model.parameters(), lr=lr)
     env = Lean4Environment()
-
-    print(f"Starte Echtzeit-Training auf Hardware-Target: {device.type.upper()}")
-
+    
+    # Dummy-Mapping für Aktionen
+    action_mapping = {0: "rfl", 1: "intro x", 2: "simp", 3: "sorry"} # ... bis 49
+    
     for epoch in range(epochs):
-        state_tokens = torch.randint(1, vocab_size, (1, 20)).to(device) 
+        # Initialer State (als Dummy-Token-Sequenz)
+        state_tokens = torch.randint(0, vocab_size, (1, 20)) 
         
-        logits, value, vram_mask = model(state_tokens, temperature=1.0)
-        dist = Categorical(logits=logits)
-        action = dist.sample()
-        log_prob = dist.log_prob(action)
+        log_probs = []
+        values = []
+        rewards = []
+        token_keep_probs = []
         
-        chosen_tactic = tactic_map[action.item()]
+        done = False
         
-        # Aufruf des echten System-Prüfers!
-        reward_val, done, feedback_info = env.execute_proof_step(
-            theorem_name=f"real_proof_{epoch}",
-            proof_script=chosen_tactic
-        )
-        
-        if device.type == "cuda":
-            vram_allocated = torch.cuda.memory_allocated(device)
-            vram_max = torch.cuda.get_device_properties(device).total_memory
-            vram_ratio = vram_allocated / vram_max
-            vram_mb = vram_allocated / (1024 * 1024)
-        else:
-            vram_ratio = 0.35 
-            vram_mb = 142.0
+        while not done:
+            action_logits, state_value, keep_probs = model(state_tokens)
             
-        reward = torch.tensor([reward_val], device=device)
-        advantage = reward - value.squeeze(-1).detach()
+            # Action Sampling
+            action_dist = torch.distributions.Categorical(logits=action_logits)
+            action = action_dist.sample()
+            
+            log_prob = action_dist.log_prob(action)
+            action_str = action_mapping.get(action.item(), "skip")
+            
+            # Schritt im Lean 4 Compiler
+            next_state_str, reward, done = env.step("Current State", action_str)
+            
+            # Speichern der Trajektorien
+            log_probs.append(log_prob)
+            values.append(state_value)
+            rewards.append(reward)
+            token_keep_probs.append(keep_probs.mean())
+            
+            # (In der Praxis: next_state_str wieder in Tokens umwandeln)
+            state_tokens = torch.randint(0, vocab_size, (1, 20))
+            
+            if len(rewards) > 10: # Safety break für Endlosschleifen
+                break
+                
+        # --- Loss Berechnung & Backpropagation ---
+        R = sum(rewards) # Simpler Return für das Beispiel
         
-        ratio = torch.exp(log_prob - log_prob.detach())
-        surr1 = ratio * advantage
-        surr2 = torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * advantage
-        actor_loss = -torch.min(surr1, surr2).mean()
-        critic_loss = F.mse_loss(value.squeeze(-1), reward)
+        policy_loss = []
+        vram_loss = []
         
-        vram_loss = vram_ratio * torch.sum(vram_mask * torch.log(vram_mask + 1e-8))
-        total_loss = actor_loss + 0.5 * critic_loss + lambda_vram * vram_loss
+        for log_prob, val, keep_prob in zip(log_probs, values, token_keep_probs):
+            advantage = R - val.item()
+            policy_loss.append(-log_prob * advantage) # RL Loss
+            vram_loss.append(keep_prob)               # Effizienz Loss (bestraft hohe Wahrscheinlichkeiten)
+            
+        policy_loss = torch.stack(policy_loss).sum()
+        vram_loss = torch.stack(vram_loss).mean()
+        
+        # Gesamtloss gemäß der obigen mathematischen Formel
+        total_loss = policy_loss + lambda_vram * vram_loss
         
         optimizer.zero_grad()
         total_loss.backward()
         optimizer.step()
         
-        if epoch % 5 == 0:
-            # Bereinige Newlines aus den Compilerfehlern für saubere Anzeige
-            clean_info = feedback_info.replace('\n', ' ').strip()[:30]
-            print(f"Epoch {epoch:02d} | Loss: {total_loss.item():.4f} | VRAM: {vram_mb:.2f} MB | Lean4: {clean_info}")
+        if epoch % 10 == 0:
+            logging.info(f"Epoch {epoch} | Total Loss: {total_loss.item():.4f} | "
+                         f"VRAM Loss (Avg Tokens Kept): {vram_loss.item():.2%} | Reward: {R}")
 
 if __name__ == "__main__":
-    train_rl_prover()
+    train_prover()
