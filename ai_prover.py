@@ -1,148 +1,154 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
-import subprocess
+import torch.nn.functional as F
+import logging
 
-# ---------------------------------------------------------
-# 1. Lean 4 Compiler Feedback Umgebung (Mock/Wrapper)
-# ---------------------------------------------------------
+logging.basicConfig(level=logging.INFO)
+
+# ==========================================
+# 1. Lean 4 Compiler Feedback System
+# ==========================================
 class Lean4Environment:
-    def __init__(self):
-        self.state = "initial_theorem_state"
-        
-    def step(self, action_string):
-        """
-        Simuliert die Kommunikation mit dem Lean 4 Compiler.
-        In Produktion würde hier ein Subprocess-Call oder LeanDojo stehen.
-        """
-        # Beispielhafter CLI-Call an Lean 4 (Pseudocode):
-        # process = subprocess.run(['lean', '--run', temp_file], capture_output=True)
-        
-        reward = 0.0
-        done = False
-        
-        # Simuliertes Feedback
-        if "exact" in action_string:
-            reward = 1.0  # Beweis gefunden
-            done = True
-        elif "simp" in action_string:
-            reward = 0.1  # Guter Zwischenschritt
-            self.state = "simplified_state"
+    def step(self, action_str):
+        """ Simuliertes Feedback der Lean 4 REPL """
+        if "sorry" in action_str:
+            return "Fehler: sorry nicht erlaubt", -1.0, True
+        elif "rfl" in action_str:
+            return "Proof Complete", 10.0, True
         else:
-            reward = -0.1 # Invalider Tactic-Call
-            
-        return self.state, reward, done
+            return "Tactic state updated", 0.1, False
 
-# ---------------------------------------------------------
-# 2. Dynamisches, differentiables Tokenizer-Modul
-# ---------------------------------------------------------
-class DynamicSoftTokenizer(nn.Module):
-    def __init__(self, embed_dim):
+# ==========================================
+# 2. Dynamischer VRAM-Tokenizer (Gumbel-Softmax)
+# ==========================================
+class DynamicVRAMTokenizer(nn.Module):
+    def __init__(self, embed_dim, temperature=1.0):
         super().__init__()
-        # Schicht zur Bewertung der Wichtigkeit eines Tokens
-        self.importance_scorer = nn.Linear(embed_dim, 1)
-
-    def forward(self, embeddings, temperature=1.0):
-        """
-        Passt die Effizienz im VRAM an, indem unwichtige Token genullt werden,
-        ohne den Gradientenfluss zu brechen (Gumbel-Softmax-Approximation).
-        """
-        # Berechne Wichtigkeitsscores für jedes Token in der Sequenz
-        scores = self.importance_scorer(embeddings) 
-        
-        # Nutze Sigmoid für eine weiche Maske (0 bis 1)
-        soft_mask = torch.sigmoid(scores / temperature)
-        
-        # Maskiere die Embeddings. Nullen sparen theoretisch in 
-        # Sparse-Attention-Mechanismen VRAM.
-        efficient_embeddings = embeddings * soft_mask
-        
-        return efficient_embeddings, soft_mask
-
-# ---------------------------------------------------------
-# 3. Das Neuronale Netzwerk für die Beweisführung
-# ---------------------------------------------------------
-class MathProverNet(nn.Module):
-    def __init__(self, vocab_size, embed_dim, hidden_dim, action_size):
-        super().__init__()
-        self.embedding = nn.Embedding(vocab_size, embed_dim)
-        self.dynamic_tokenizer = DynamicSoftTokenizer(embed_dim)
-        
-        self.lstm = nn.LSTM(embed_dim, hidden_dim, batch_first=True)
-        
-        # Actor-Critic Köpfe
-        self.actor = nn.Linear(hidden_dim, action_size)
-        self.critic = nn.Linear(hidden_dim, 1)
+        self.embed_dim = embed_dim
+        self.temperature = temperature
+        self.keep_predictor = nn.Linear(embed_dim, 2) 
 
     def forward(self, x):
-        embedded = self.embedding(x)
+        """
+        x: [Batch (muss 1 sein für dynamischen Slice), Sequence_Length, Embed_Dim]
+        """
+        logits = self.keep_predictor(x) 
         
-        # Dynamische Anpassung aufrufen
-        efficient_embedded, token_mask = self.dynamic_tokenizer(embedded)
+        if self.training:
+            gumbel_out = F.gumbel_softmax(logits, tau=self.temperature, hard=True, dim=-1)
+            keep_mask_discrete = gumbel_out[0, :, 1] 
+        else:
+            keep_mask_discrete = (logits[0, :, 1] > logits[0, :, 0]).float()
         
-        lstm_out, _ = self.lstm(efficient_embedded)
-        last_hidden = lstm_out[:, -1, :] # Nimm den letzten Hidden State
+        soft_probs = F.softmax(logits / self.temperature, dim=-1)[0, :, 1]
         
-        action_probs = F.softmax(self.actor(last_hidden), dim=-1)
-        state_value = self.critic(last_hidden)
+        # --- STRAFFUNG DER SEQUENZ (Echte VRAM-Einsparung) ---
+        # Wir extrahieren nur die Zeilen, bei denen die diskrete Maske == 1 ist.
+        indices = torch.nonzero(keep_mask_discrete).squeeze(-1)
         
-        return action_probs, state_value, token_mask
+        if indices.numel() == 0:
+            # Fallback: Falls die KI alles löschen will, behalten wir das erste Token
+            indices = torch.tensor([0], device=x.device)
+            
+        # Dynamischer Slice der Sequenzlänge
+        x_filtered = x[:, indices, :]
+        
+        return x_filtered, soft_probs, keep_mask_discrete
 
-# ---------------------------------------------------------
-# 4. Trainingsschleife (Reinforcement Learning - REINFORCE Basis)
-# ---------------------------------------------------------
+# ==========================================
+# 3. RL-Policy Netzwerk (Prover Agent)
+# ==========================================
+class LeanProverNet(nn.Module):
+    def __init__(self, vocab_size, embed_dim, action_dim):
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, embed_dim)
+        self.dynamic_tokenizer = DynamicVRAMTokenizer(embed_dim)
+        
+        encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=4, batch_first=True)
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=2)
+        
+        self.policy_head = nn.Linear(embed_dim, action_dim)
+        self.value_head = nn.Linear(embed_dim, 1)
+
+    def forward(self, state_tokens):
+        x = self.embedding(state_tokens)
+        
+        # Sequenz wird hier physisch gekürzt, bevor sie in den Transformer geht!
+        x_filtered, keep_probs, mask = self.dynamic_tokenizer(x)
+        
+        transformer_out = self.transformer(x_filtered)
+        pooled = transformer_out.mean(dim=1)
+        
+        action_logits = self.policy_head(pooled)
+        state_value = self.value_head(pooled)
+        
+        return action_logits, state_value, keep_probs
+
+# ==========================================
+# 4. Training Loop
+# ==========================================
 def train_prover():
-    vocab_size = 1000
-    embed_dim = 128
-    hidden_dim = 256
-    action_size = 50 # Anzahl möglicher Lean-Tactics
+    vocab_size, embed_dim, action_dim = 1000, 128, 4
+    lr = 3e-4
+    lambda_vram = 0.5  # Höhere Gewichtung für spürbaren Kompressionsdruck
+    epochs = 50
     
-    model = MathProverNet(vocab_size, embed_dim, hidden_dim, action_size)
-    optimizer = optim.Adam(model.parameters(), lr=1e-4)
+    model = LeanProverNet(vocab_size, embed_dim, action_dim)
+    optimizer = optim.AdamW(model.parameters(), lr=lr)
     env = Lean4Environment()
     
-    # Hyperparameter für den Tokenizer-Verlust
-    lambda_tok = 0.05
-    alpha = 1.0
-    
-    epochs = 100
+    action_mapping = {0: "rfl", 1: "intro x", 2: "simp", 3: "sorry"}
     
     for epoch in range(epochs):
-        # 1. Simuliere State (in echt: Tactic State aus Lean parsen und tokenisieren)
-        # Dummy-Tensor für Token-Sequenz (Batch Size 1, Seq Len 20)
-        state_tensor = torch.randint(0, vocab_size, (1, 20)) 
+        state_tokens = torch.randint(0, vocab_size, (1, 20)) 
         
-        action_probs, state_value, token_mask = model(state_tensor)
+        log_probs, values, rewards, token_keep_probs = [], [], [], []
+        done = False
         
-        # 2. Aktion sampeln und in Lean 4 ausführen
-        action_dist = torch.distributions.Categorical(action_probs)
-        action = action_dist.sample()
+        while not done:
+            action_logits, state_value, keep_probs = model(state_tokens)
+            
+            action_dist = torch.distributions.Categorical(logits=action_logits)
+            action = action_dist.sample()
+            
+            log_prob = action_dist.log_prob(action)
+            action_str = action_mapping.get(action.item(), "sorry")
+            
+            _, reward, done = env.step(action_str)
+            
+            log_probs.append(log_prob)
+            values.append(state_value)
+            rewards.append(reward)
+            token_keep_probs.append(keep_probs.mean())
+            
+            state_tokens = torch.randint(0, vocab_size, (1, 20))
+            if len(rewards) > 5: break
+                
+        # --- REINFORCE Verlustberechnung ---
+        R = sum(rewards)
+        policy_loss = []
+        vram_loss = []
         
-        # Mapping von Action-ID zu Lean-Tactic (stark vereinfacht)
-        tactic_str = "simp" if action.item() % 2 == 0 else "exact" 
-        next_state, reward, done = env.step(tactic_str)
+        for log_prob, val, keep_prob in zip(log_probs, values, token_keep_probs):
+            advantage = R - val.item()
+            policy_loss.append(-log_prob * advantage)
+            
+            # Entropie-Regularisierung hinzugefügt: Bestraft zu hohe "Keep"-Wahrscheinlichkeiten
+            vram_loss.append(keep_prob)
+            
+        policy_loss = torch.stack(policy_loss).sum()
+        vram_loss = torch.stack(vram_loss).mean()
         
-        # 3. Verlust berechnen
-        # RL Verlust (Actor-Critic Advantage)
-        advantage = reward - state_value.item()
-        actor_loss = -action_dist.log_prob(action) * advantage
-        critic_loss = F.mse_loss(state_value, torch.tensor([[reward]]))
-        rl_loss = actor_loss + critic_loss
+        total_loss = policy_loss + lambda_vram * vram_loss
         
-        # Tokenizer Effizienz Verlust (Sparsity)
-        tok_sparsity_loss = torch.mean(token_mask) # Bestrafe viele aktive Token
-        
-        # Gesamtverlust
-        total_loss = rl_loss + (lambda_tok * alpha * tok_sparsity_loss)
-        
-        # 4. Backpropagation
         optimizer.zero_grad()
         total_loss.backward()
         optimizer.step()
         
         if epoch % 10 == 0:
-            print(f"Epoch {epoch} | Total Loss: {total_loss.item():.4f} | Reward: {reward}")
+            logging.info(f"Epoch {epoch:02d} | Loss: {total_loss.item():.4f} | "
+                         f"Tokens im VRAM behalten: {vram_loss.item():.2%} | Gesamt-Reward: {R}")
 
 if __name__ == "__main__":
     train_prover()
