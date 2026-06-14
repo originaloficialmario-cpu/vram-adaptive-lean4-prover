@@ -1,144 +1,148 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributions import Categorical
+import torch.optim as optim
+import subprocess
 
-class DifferentiableVRAMTokenizer(nn.Module):
-    """
-    Optimiert die Token-Auswahl über Gumbel-Softmax.
-    Liefert eine Maske, die direkt vom PyTorch Transformer verstanden wird.
-    """
-    def __init__(self, embed_dim: int, tau: float = 1.0):
-        super().__init__()
-        self.tau = tau  
-        self.mask_predictor = nn.Linear(embed_dim, 2)
-
-    def forward(self, x: torch.Tensor):
-        # x Shape: [Batch_Size, Sequence_Length, Embed_Dim]
-        logits = self.mask_predictor(x) # Shape: [B, N, 2]
+# ---------------------------------------------------------
+# 1. Lean 4 Compiler Feedback Umgebung (Mock/Wrapper)
+# ---------------------------------------------------------
+class Lean4Environment:
+    def __init__(self):
+        self.state = "initial_theorem_state"
         
-        if self.training:
-            # hard=True liefert im Forward-Pass ein One-Hot-Szenario,
-            # behält im Backward-Pass aber die weichen Gradienten.
-            soft_mask = F.gumbel_softmax(logits, tau=self.tau, hard=True, dim=-1)
-            binary_mask = soft_mask[:, :, 1] # 1 = Keep, 0 = Drop
+    def step(self, action_string):
+        """
+        Simuliert die Kommunikation mit dem Lean 4 Compiler.
+        In Produktion würde hier ein Subprocess-Call oder LeanDojo stehen.
+        """
+        # Beispielhafter CLI-Call an Lean 4 (Pseudocode):
+        # process = subprocess.run(['lean', '--run', temp_file], capture_output=True)
+        
+        reward = 0.0
+        done = False
+        
+        # Simuliertes Feedback
+        if "exact" in action_string:
+            reward = 1.0  # Beweis gefunden
+            done = True
+        elif "simp" in action_string:
+            reward = 0.1  # Guter Zwischenschritt
+            self.state = "simplified_state"
         else:
-            binary_mask = torch.argmax(logits, dim=-1).float()
-        
-        probs = F.softmax(logits, dim=-1)[:, :, 1]
-        return binary_mask, probs
+            reward = -0.1 # Invalider Tactic-Call
+            
+        return self.state, reward, done
 
-class TheoremProverPolicy(nn.Module):
-    def __init__(self, vocab_size: int, embed_dim: int, num_actions: int, num_heads: int = 4):
+# ---------------------------------------------------------
+# 2. Dynamisches, differentiables Tokenizer-Modul
+# ---------------------------------------------------------
+class DynamicSoftTokenizer(nn.Module):
+    def __init__(self, embed_dim):
+        super().__init__()
+        # Schicht zur Bewertung der Wichtigkeit eines Tokens
+        self.importance_scorer = nn.Linear(embed_dim, 1)
+
+    def forward(self, embeddings, temperature=1.0):
+        """
+        Passt die Effizienz im VRAM an, indem unwichtige Token genullt werden,
+        ohne den Gradientenfluss zu brechen (Gumbel-Softmax-Approximation).
+        """
+        # Berechne Wichtigkeitsscores für jedes Token in der Sequenz
+        scores = self.importance_scorer(embeddings) 
+        
+        # Nutze Sigmoid für eine weiche Maske (0 bis 1)
+        soft_mask = torch.sigmoid(scores / temperature)
+        
+        # Maskiere die Embeddings. Nullen sparen theoretisch in 
+        # Sparse-Attention-Mechanismen VRAM.
+        efficient_embeddings = embeddings * soft_mask
+        
+        return efficient_embeddings, soft_mask
+
+# ---------------------------------------------------------
+# 3. Das Neuronale Netzwerk für die Beweisführung
+# ---------------------------------------------------------
+class MathProverNet(nn.Module):
+    def __init__(self, vocab_size, embed_dim, hidden_dim, action_size):
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, embed_dim)
-        self.tokenizer_opt = DifferentiableVRAMTokenizer(embed_dim)
+        self.dynamic_tokenizer = DynamicSoftTokenizer(embed_dim)
         
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=embed_dim, nhead=num_heads, dim_feedforward=embed_dim*4, batch_first=True
-        )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=2)
+        self.lstm = nn.LSTM(embed_dim, hidden_dim, batch_first=True)
         
-        self.policy_head = nn.Linear(embed_dim, num_actions)
-        self.value_head = nn.Linear(embed_dim, 1)
+        # Actor-Critic Köpfe
+        self.actor = nn.Linear(hidden_dim, action_size)
+        self.critic = nn.Linear(hidden_dim, 1)
 
-    def forward(self, state_tokens: torch.Tensor):
-        x = self.embedding(state_tokens)
+    def forward(self, x):
+        embedded = self.embedding(x)
         
-        # Maske berechnen (1 = behalten, 0 = droppen)
-        mask, keep_probs = self.tokenizer_opt(x)
+        # Dynamische Anpassung aufrufen
+        efficient_embedded, token_mask = self.dynamic_tokenizer(embedded)
         
-        # WICHTIG: PyTorch Transformer erwartet für src_key_padding_mask ein Byte-/Bool-Tensor,
-        # bei dem TRUE bedeutet, dass das Token IGNORIERT (gedroppt) werden soll.
-        # Daher invertieren wir die Maske: 1 (Keep) -> False, 0 (Drop) -> True
-        src_key_padding_mask = (mask == 0)
+        lstm_out, _ = self.lstm(efficient_embedded)
+        last_hidden = lstm_out[:, -1, :] # Nimm den letzten Hidden State
         
-        # Inferenz-Optimierung (Optional):
-        # Wenn wir nicht im Training sind, könnten wir hier die Token physisch per Indexing 
-        # herausschneiden, um echte VRAM/Zeit-Einsparungen im RAM zu erzielen.
-        # Im Training nutzen wir das src_key_padding_mask-Feature des Transformers:
-        transformer_out = self.transformer(x, src_key_padding_mask=src_key_padding_mask)
+        action_probs = F.softmax(self.actor(last_hidden), dim=-1)
+        state_value = self.critic(last_hidden)
         
-        # Globales Pooling (Nur über valide Token)
-        valid_tokens = mask.unsqueeze(-1).clamp(min=1e-9)
-        pooled = (transformer_out * valid_tokens).sum(dim=1) / valid_tokens.sum(dim=1)
-        
-        action_logits = self.policy_head(pooled)
-        state_value = self.value_head(pooled)
-        
-        return action_logits, state_value, keep_probs, mask
+        return action_probs, state_value, token_mask
 
-# --- KORRIGIERTER TRAININGSLOOP ---
-
-VOCAB_SIZE = 1000
-EMBED_DIM = 64
-NUM_ACTIONS = 10
-MAX_SEQ_LEN = 20
-LAMBDA_VRAM = 0.05  
-LAMBDA_VALUE = 0.5 # Gewichtung für den Kritiker-Verlust
-LR = 1e-3
-
-model = TheoremProverPolicy(VOCAB_SIZE, EMBED_DIM, NUM_ACTIONS)
-optimizer = torch.optim.Adam(model.parameters(), lr=LR)
-# Simulierter Environment-Step bleibt gleich
-from main import LeanEnvironmentSimulator # Falls in separater Datei, hier importiert
-env = LeanEnvironmentSimulator(VOCAB_SIZE, MAX_SEQ_LEN)
-
-state = torch.randint(0, VOCAB_SIZE, (1, MAX_SEQ_LEN))
-
-log_probs = []
-vram_losses = []
-values = []
-rewards = []
-
-for t in range(5):
-    logits, value, keep_probs, mask = model(state)
+# ---------------------------------------------------------
+# 4. Trainingsschleife (Reinforcement Learning - REINFORCE Basis)
+# ---------------------------------------------------------
+def train_prover():
+    vocab_size = 1000
+    embed_dim = 128
+    hidden_dim = 256
+    action_size = 50 # Anzahl möglicher Lean-Tactics
     
-    dist = Categorical(logits=logits)
-    action = dist.sample()
+    model = MathProverNet(vocab_size, embed_dim, hidden_dim, action_size)
+    optimizer = optim.Adam(model.parameters(), lr=1e-4)
+    env = Lean4Environment()
     
-    log_probs.append(dist.log_prob(action))
-    values.append(value.squeeze())
+    # Hyperparameter für den Tokenizer-Verlust
+    lambda_tok = 0.05
+    alpha = 1.0
     
-    # Schnitt der Beibehaltungs-Wahrscheinlichkeiten
-    vram_losses.append(keep_probs.mean())
+    epochs = 100
     
-    next_state, reward, done = env.step(action.item())
-    rewards.append(reward)
-    
-    if done:
-        break
-    state = next_state
+    for epoch in range(epochs):
+        # 1. Simuliere State (in echt: Tactic State aus Lean parsen und tokenisieren)
+        # Dummy-Tensor für Token-Sequenz (Batch Size 1, Seq Len 20)
+        state_tensor = torch.randint(0, vocab_size, (1, 20)) 
+        
+        action_probs, state_value, token_mask = model(state_tensor)
+        
+        # 2. Aktion sampeln und in Lean 4 ausführen
+        action_dist = torch.distributions.Categorical(action_probs)
+        action = action_dist.sample()
+        
+        # Mapping von Action-ID zu Lean-Tactic (stark vereinfacht)
+        tactic_str = "simp" if action.item() % 2 == 0 else "exact" 
+        next_state, reward, done = env.step(tactic_str)
+        
+        # 3. Verlust berechnen
+        # RL Verlust (Actor-Critic Advantage)
+        advantage = reward - state_value.item()
+        actor_loss = -action_dist.log_prob(action) * advantage
+        critic_loss = F.mse_loss(state_value, torch.tensor([[reward]]))
+        rl_loss = actor_loss + critic_loss
+        
+        # Tokenizer Effizienz Verlust (Sparsity)
+        tok_sparsity_loss = torch.mean(token_mask) # Bestrafe viele aktive Token
+        
+        # Gesamtverlust
+        total_loss = rl_loss + (lambda_tok * alpha * tok_sparsity_loss)
+        
+        # 4. Backpropagation
+        optimizer.zero_grad()
+        total_loss.backward()
+        optimizer.step()
+        
+        if epoch % 10 == 0:
+            print(f"Epoch {epoch} | Total Loss: {total_loss.item():.4f} | Reward: {reward}")
 
-# REINFORCE + Kritiker-Loss-Berechnung
-returns = []
-discounted_sum = 0
-for r in reversed(rewards):
-    discounted_sum = r + 0.99 * discounted_sum
-    returns.insert(0, discounted_sum)
-
-returns = torch.tensor(returns, dtype=torch.float32)
-log_probs = torch.stack(log_probs)
-vram_losses = torch.stack(vram_losses)
-values = torch.stack(values)
-
-# Advantage-Berechnung
-advantages = returns - values.detach()
-
-# 1. RL (Policy) Loss
-l_rl = - (log_probs * advantages).mean()
-
-# 2. VRAM Sparsamkeits-Loss
-l_vram = vram_losses.mean()
-
-# 3. KORREKTUR: Value (Kritiker) Loss berechnen und optimieren
-l_value = F.mse_loss(values, returns)
-
-# Gesamter Loss inklusive Kritiker-Update
-l_total = l_rl + (LAMBDA_VRAM * l_vram) + (LAMBDA_VALUE * l_value)
-
-optimizer.zero_grad()
-l_total.backward()
-optimizer.step()
-
-print(f"RL Loss: {l_rl.item():.4f} | VRAM Loss: {l_vram.item():.4f} | Value Loss: {l_value.item():.4f} | Total Loss: {l_total.item():.4f}")
+if __name__ == "__main__":
+    train_prover()
