@@ -1,5 +1,5 @@
 import os
-import random
+import subprocess
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -7,22 +7,59 @@ from torch.distributions import Categorical
 import torch.nn.functional as F
 
 # =====================================================================
-# 1. MOCK LEAN 4 COMPILER ENVIRONMENT
+# 1. REAL LEAN 4 COMPILER INTERACTION PIPELINE
 # =====================================================================
 class Lean4Environment:
     def __init__(self, project_dir="math_project"):
         self.project_dir = project_dir
+        if not os.path.exists(project_dir):
+            os.makedirs(project_dir)
 
     def execute_proof_step(self, theorem_name, proof_script):
-        # Simuliertes Feedback, damit das RL-Modell ohne installierten Compiler trainiert
-        if random.random() > 0.3:
-            reward = 1.0
-            done = True
-            info = "Beweis akzeptiert! (Simuliert)"
-        else:
+        """
+        Schreibt das mathematische Theorem live in eine Datei und
+        jagt es direkt durch den frisch installierten Lean 4 Compiler.
+        """
+        file_path = os.path.join(self.project_dir, f"{theorem_name}.lean")
+        
+        # Erstelle ein echtes Lean 4 Dokument mit Anbindung an die heruntergeladene Mathlib
+        lean_code = f"""import Mathlib
+
+theorem {theorem_name} {proof_script}
+"""
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(lean_code)
+            
+        # Rufe den echten Lean 4 Compiler auf deinem G5 auf!
+        try:
+            result = subprocess.run(
+                ["lean", file_path], 
+                capture_output=True, 
+                text=True, 
+                timeout=5
+            )
+            
+            # Auswertung des echten Compiler-Feedbacks
+            output = result.stderr if result.stderr else result.stdout
+            
+            if result.returncode == 0 and "error" not in output.lower():
+                reward = 1.0  # Der mathematische Beweis ist absolut fehlerfrei!
+                done = True
+                info = "Beweis akzeptiert!"
+            else:
+                done = False
+                info = output if output else "Unbekannter Syntaxfehler"
+                # Belohnungssystem basierend auf verbleibenden Zielen (Goals)
+                if "remaining goals" in output.lower():
+                    reward = 0.2
+                else:
+                    reward = -0.1  # Schlimmer Logikfehler im Beweis
+                    
+        except subprocess.TimeoutExpired:
+            reward = -0.5
             done = False
-            info = "remaining goals: 1"
-            reward = 0.1
+            info = "Compiler Timeout"
+            
         return reward, done, info
 
 # =====================================================================
@@ -65,26 +102,26 @@ class ActorCriticModel(nn.Module):
         return action_logits, state_values, vram_mask
 
 # =====================================================================
-# 3. RL REINFORCEMENT LEARNING TRAINING LOOP WITH PPO & CUDA
+# 3. RL REINFORCEMENT LEARNING TRAINING LOOP
 # =====================================================================
 def train_rl_prover():
     vocab_size = 1000
     embedding_dim = 128
     hidden_dim = 256
-    action_dim = 50 
-    epochs = 100
-    gamma = 0.99
+    action_dim = 4 
+    epochs = 50  # Kompakter Testlauf für echte Compiler-Geschwindigkeit
     clip_eps = 0.2
     lambda_vram = 0.01 
     
-    tactic_map = {0: "by rfl", 1: "by linarith", 2: "by ring", 3: "by intro"}
+    # Echte Lean 4 Beweis-Taktiken
+    tactic_map = {0: ":= by rfl", 1: ":= by linarith", 2: ":= by ring", 3: "(n : Nat) : n + 0 = n := by induction n"}
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = ActorCriticModel(vocab_size, embedding_dim, hidden_dim, action_dim).to(device)
     optimizer = optim.AdamW(model.parameters(), lr=1e-4)
     env = Lean4Environment()
 
-    print(f"Starte Training auf Hardware-Target: {device.type.upper()}")
+    print(f"Starte Echtzeit-Training auf Hardware-Target: {device.type.upper()}")
 
     for epoch in range(epochs):
         state_tokens = torch.randint(1, vocab_size, (1, 20)).to(device) 
@@ -94,12 +131,12 @@ def train_rl_prover():
         action = dist.sample()
         log_prob = dist.log_prob(action)
         
-        tactic_idx = action.item() % len(tactic_map)
-        chosen_tactic = tactic_map[tactic_idx]
+        chosen_tactic = tactic_map[action.item()]
         
+        # Aufruf des echten System-Prüfers!
         reward_val, done, feedback_info = env.execute_proof_step(
-            theorem_name=f"epoch_proof_{epoch}",
-            proof_script=f"(n : Nat) : n + 0 = n := {chosen_tactic}"
+            theorem_name=f"real_proof_{epoch}",
+            proof_script=chosen_tactic
         )
         
         if device.type == "cuda":
@@ -127,8 +164,10 @@ def train_rl_prover():
         total_loss.backward()
         optimizer.step()
         
-        if epoch % 10 == 0:
-            print(f"Epoch {epoch:03d} | Loss: {total_loss.item():.4f} | VRAM: {vram_mb:.2f} MB | Ratio: {vram_ratio*100:.3f}% | Lean4: {feedback_info.strip()[:25]}")
+        if epoch % 5 == 0:
+            # Bereinige Newlines aus den Compilerfehlern für saubere Anzeige
+            clean_info = feedback_info.replace('\n', ' ').strip()[:30]
+            print(f"Epoch {epoch:02d} | Loss: {total_loss.item():.4f} | VRAM: {vram_mb:.2f} MB | Lean4: {clean_info}")
 
 if __name__ == "__main__":
     train_rl_prover()
