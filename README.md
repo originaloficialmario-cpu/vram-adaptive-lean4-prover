@@ -1,21 +1,16 @@
-# VRAM-Adaptive Lean 4 Prover
+Die Verlustfunktion für dynamische Tokenizer-Effizienz
 
-Reinforcement Learning based mathematical theorem prover with differentiable VRAM tokenizer optimization.
+Um den Tokenizer während des Trainings anzupassen, fügen wir der RL-Verlustfunktion einen Regularisierungsterm hinzu. Wir definieren eine weiche Maske über die Sequenzlänge, die das Modell zwingt, nur die relevantesten Token im VRAM zu behalten.
 
-### 📐 Mathematische Fundierung
+Die kombinierte Verlustfunktion lautet:
+Ltotal​=LRL​+λ(αt=1∑T​σ(W⋅ht​)−βt=1∑T​pt​log(pt​))
 
-$$L_{\text{total}} = L_{\text{RL}}(\theta) + \lambda \cdot L_{\text{VRAM}}(\phi)$$
+Erklärung der Komponenten:
 
-Wobei der RL-Loss (hier als klassischer REINFORCE/Policy-Gradient mit Advantage $A_t$ dargestellt) definiert ist als:
+    LRL​: Der Standard-Reinforcement-Learning-Verlust (z. B. PPO oder REINFORCE).
 
-$$L_{\text{RL}}(\theta) = -\frac{1}{T}\sum_{t=1}^{T} \log \pi_{\theta}(a_t \mid s_t, m_t)A_t$$
+    λ: Skalierungsfaktor für den Tokenizer-Verlust.
 
-Die Verlustfunktion für die dynamische Token-Anpassung ($L_{\text{VRAM}}$), welche die VRAM-Auslastung minimiert, berechnet sich aus dem Erwartungswert der Beibehaltungswahrscheinlichkeiten $p_i$ für jedes Token $i$ der Sequenzlänge $N$:
+    α∑σ(W⋅ht​): Bestraft die Anzahl der aktivierten Token (L1-ähnliche Sparsity), um VRAM freizugeben.
 
-$$L_{\text{VRAM}}(\phi) = \frac{1}{N}\sum_{i=1}^{N} p_{\phi}(x_i)$$
-
-Durch den Gumbel-Softmax-Trick wird die diskrete Maske $m_i \in \{0,1\}$ im Forward-Pass verwendet, um tatsächlichen VRAM durch das Entfernen von Token in den Attention-Schichten zu sparen, während im Backward-Pass die kontinuierlichen Wahrscheinlichkeiten $p_i$ für den Gradientenfluss genutzt werden.
-
-### 💻 PyTorch-Implementierung
-
-Das folgende Skript stellt eine vollständige Architektur dar. Es simuliert die Interaktion mit dem Lean 4 Compiler (da ein echter Aufruf eine spezifische Lean-REPL-Umgebung erfordert) und implementiert das neuartige dynamische Token-Masking.
+    β∑pt​log(pt​): Entropie-Term, der verhindert, dass das Modell alle Token komplett verwirft, und stattdessen eine informierte Entscheidung trifft.
