@@ -68,41 +68,34 @@ class MathematicalProverNet(nn.Module):
         self.actor = nn.Linear(embed_dim, action_size)
         self.critic = nn.Linear(embed_dim, 1)
 
-    def forward(self, x, temperature=1.0, hard_prune=False):
-        # e_i: Initial Embeddings
+def forward(self, x, temperature=1.0):
         e = self.embedding(x) 
-        
-        # Berechne die Logits für die Token-Auswahl: pi_psi(e_i | s_t)
         token_logits = self.tokenizer_head(e) 
+        soft_probs = F.gumbel_softmax(token_logits, tau=temperature, hard=True, dim=-1)
         
-        # Gumbel-Softmax Stichprobe (differenzierbar)
-        # soft_probs hat die Form [Batch, Seq_Len, 2]
-        soft_probs = F.gumbel_softmax(token_logits, tau=temperature, hard=False, dim=-1)
+        keep_prob_index_1 = soft_probs[:, :, 1] # Form: [Batch, Seq_Len]
         
-        # Extrahiere die weiche Wahrscheinlichkeit für Index 1: \sigma_\tau(pi_\psi(...))_1
-        keep_prob_index_1 = soft_probs[:, :, 1]
+        # HIER IST DIE REALITÄTS-KORREKTUR:
+        # PyTorch Transformer erwartet ein 'True' für Token, die IGNORIERT werden sollen.
+        # Wenn keep_prob_index_1 == 0 ist, soll padding_mask == True sein.
+        padding_mask = (keep_prob_index_1 < 0.5) 
         
-        if hard_prune:
-            # Im harten Modus erzeugen wir eine strikte 0/1 Maske
-            keep_mask = (keep_prob_index_1 > 0.5).float()
-            # Nutze STE, um physisch zu nullen/prunen ohne Gradientenabriss
-            efficient_embeddings = STETokenPruner.apply(e, keep_mask.unsqueeze(-1))
-        else:
-            # Standardmäßiges weiches Einblenden während der frühen Trainingsphase
-            efficient_embeddings = e * keep_prob_index_1.unsqueeze(-1)
-            
-        # Flussabwärts-Verarbeitung (spart Rechenzeit bei echten Sparse-Matrizen)
-        encoded_state = self.encoder(efficient_embeddings)
+        # Wir multiplizieren das Embedding (für den Gradientenfluss via STE)
+        efficient_embeddings = e * keep_prob_index_1.unsqueeze(-1)
         
-        # Globales Pooling über die verbleibenden Token-Repräsentationen
-        pooled_state = torch.mean(encoded_state, dim=1)
+        # ECHTE RECHEN- UND VRAM-ERSPARNIS: 
+        # Der Transformer ignoriert nun physisch die als False markierten Pfade
+        encoded_state = self.encoder(efficient_embeddings, src_key_padding_mask=padding_mask)
         
-        # Policy (Akteur) und Value (Kritiker)
+        # Pooling unter Ausschluss der ignored Token
+        # (Verhindert, dass genullte Token den Mittelwert verfälschen)
+        input_mask = keep_prob_index_1.unsqueeze(-1)
+        pooled_state = (encoded_state * input_mask).sum(dim=1) / (input_mask.sum(dim=1) + 1e-9)
+        
         action_probs = F.softmax(self.actor(pooled_state), dim=-1)
         state_value = self.critic(pooled_state)
         
         return action_probs, state_value, keep_prob_index_1
-
 # ---------------------------------------------------------
 # 4. Trainings- und Optimierungsschleife
 # ---------------------------------------------------------
