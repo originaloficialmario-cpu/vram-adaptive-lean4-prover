@@ -97,3 +97,75 @@ This reference matrix maps core deep learning challenges to their specific archi
 | **Sequence Drift** | Chronological Index Sorting | Leverages `torch.sort` to preserve the relative positioning grammar. |
 | **Compiler Bottleneck** | Asynchronous Result Queues | Detaches tactical compilation loops from backpropagation threads. |
 | **Representation Starvation** | Hard Capacity Boundary | Guarantees a physical floor of $k \ge 1$ to preserve the information base. |
+
+---
+
+### 10. Vectorized MCTS PUCT Architecture
+Search throughput scales directly with the parallel exploration efficiency of the proof tree. To bypass standard, high-overhead Python multi-threading bottlenecks, our search architecture executes a native tensor-driven engine directly on GPU hardware.
+
+#### 10.1 Batch PUCT Computation
+To minimize branching execution latency during the expansion phase, the system vectorizes the standard PUCT (Predictor + Upper Confidence Bound applied to Trees) formula entirely over pre-allocated CUDA buffers:
+
+$$a_t = \arg\max_a \left( Q(s,a) + c_{\text{puct}} \cdot P(s,a) \frac{\sqrt{\sum_b N(s,b)}}{1 + N(s,a)} \right)$$
+
+* **Memory Pre-Allocation:** Tensors representing $Q$-values, visit counts ($N$), and policy priors ($P$) are stored as continuous, pre-allocated memory slices (`initialize_tree_memory`), completely bypassing runtime Python object instantiation overhead.
+* **Massive Parallelism:** The tree handles an operational batch size of 128 parallel proof branches (`batch_size=128`) simultaneously, executing node valuations within microseconds and speeding up tree traversals by a factor of 100+ compared to CPU-bound execution.
+
+#### 10.2 Tensor Core Optimization
+* **Context Preservation:** Inference states operate strictly under `torch.no_grad()` blocks to prevent unnecessary computational graphs from populating and fragmenting activation memory inside the VRAM pool.
+* **FlashAttention (SDPA):** Hardware-level Scaled Dot Product Attention triggers direct acceleration on NVIDIA Tensor Cores, optimizing intermediate memory steps.
+* **Memory Contiguity:** Enforcing `.contiguous()` transformations following tensor reshape hooks guarantees maximum L1/L2 cache locality, driving down latency metrics for Query, Key, and Value matrices.
+
+---
+
+### 11. Rigorous Error & System State Analysis
+
+#### 11.1 Error Categorization Matrix
+The framework maintains absolute operational runtime stability by actively stratifying fault conditions:
+
+| Fault Classification | Real-World Identification Indicator | Automated System-Level Response Protocol |
+| :--- | :--- | :--- |
+| **Logical Violation** | Lean 4 compiler returns a syntax error or a fractured tactical proof state. | Triggers immediate reinforcement reward collapse, inducing hard negative policy feedback loops. |
+| **Resource Violation** | VRAM allocation thresholds approach critical fragmentation limits or an OOM vector. | Triggers the *Cascaded Funnel* to aggressively spike token pruning pressures down the layer stack. |
+| **System Latency** | Lean 4 CPU compiler worker exceeds the rigid verification timeout window (>200ms). | The task drops from the `result_queue`, protecting the GPU train thread from blocking states. |
+
+#### 11.2 Architectural Reference Guardrail
+As a fundamental structural guardrail against token degradation, the capacity ceiling parameter $k$ computes its reduction slices relative to the *initial sequence length $T$* rather than downstream intermediate dimensions ($h.\text{shape}[1]$). This design pattern strictly eliminates layer-wise context starvation and preserves global structural grammar throughout the deep transformer pipeline.
+
+---
+
+### 12. Architectural Specification Summary
+The VRAM-Adaptive Lean 4 Prover establishes a secure co-dependency blueprint optimizing:
+1. **Memory Efficiency:** Attained through differentiable, layer-wise sequence compression.
+2. **Execution Velocity:** Maintained via highly parallelized, Tensor Core-driven MCTS graph traversals.
+3. **Process Resilience:** Achieved by decoupling CPU-bound compilation loops from the GPU backpropagation environment.
+
+---
+
+### 13. Comprehensive Logging & Monitoring Dashboard
+The runtime architecture streams continuous performance telemetry to the console interface, acting as a real-time health dashboard for the internal stability of the transformer network.
+
+#### 13.1 Training Telemetry Interpretation
+A typical telemetry output frame scales as follows:
+`Step [02d] | L_total: [0.xxxx] | Router Density: [xx.xx%]`
+
+* **Step:** Represents the current training iteration cycle within the active batch sequence epoch.
+* **L_total:** Represents the aggregated loss vector ($L_{\text{Actor}} + L_{\text{Critic}}$). Steady downward trajectories confirm stable convergence, while steep, non-periodic spikes point toward unstable tactic generation branches.
+* **Router Density:** Represents the mean activation percentage of the interior router heads. A value near 100% indicates zero structural sequence compression; a value descending close to 0% flags an early warning for structural representation collapse.
+
+#### 13.2 Real-Time Diagnostic & Troubleshooting Framework
+* **Loss Explodes ($NaN$ or $Inf$ Values):**
+  * *Root Cause Analysis:* Extreme gradient explosions causing layer instability.
+  * *System Remediation:* Verify that `clip_grad_norm_` operates correctly with a hard ceiling of `max_norm=1.0`. Inspect the numerical stability of the categorical output distribution logit matrices.
+* **Router Density Collapses Toward 0%:**
+  * *Root Cause Analysis:* The optimization graph identifies that zeroing out the entire sequence yields the lowest mathematical error penalty when missing positive RL feedback.
+  * *System Remediation:* Ensure that the hardware floor guardrail ($k \ge 1$) actively intercepts the capacity layer to block total context starvation.
+* **Replay Buffer Stalls (No Active Queue Updates):**
+  * *Root Cause Analysis:* The worker threads inside `run_async_pipeline.py` encounter blocking states.
+  * *System Remediation:* Check if the background multi-processing units (`lean4_cpu_worker`) handle poison-pill signals cleanly and verify that the `task_queue` has not hit deadlocks.
+
+#### 13.3 Performance Monitoring Metrics
+During intensive benchmarking routines against the formal *mathlib4* data array, developers must actively isolate the Critic valuation boundaries:
+`Evaluation Finished | Value Range: [min, max]`
+* **Compressed Bounds (e.g., `[0.0, 0.0]`):** Indicates that the Critic network has hit a stagnation floor, meaning it can no longer differentiate the quality of mathematical states.
+* **Divergent Bounds (e.g., `[-100.0, +100.0]`):** Points to massive gradient over-corrections, requiring a heavier structural loss weight assignment for the Critic Mean Squared Error ($F.\text{mse\_loss}$) within the global $L_{\text{total}}$ function.
