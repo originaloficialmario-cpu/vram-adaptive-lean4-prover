@@ -169,3 +169,36 @@ During intensive benchmarking routines against the formal *mathlib4* data array,
 `Evaluation Finished | Value Range: [min, max]`
 * **Compressed Bounds (e.g., `[0.0, 0.0]`):** Indicates that the Critic network has hit a stagnation floor, meaning it can no longer differentiate the quality of mathematical states.
 * **Divergent Bounds (e.g., `[-100.0, +100.0]`):** Points to massive gradient over-corrections, requiring a heavier structural loss weight assignment for the Critic Mean Squared Error ($F.\text{mse\_loss}$) within the global $L_{\text{total}}$ function.
+
+---
+
+### 14. Async Buffer Configuration Guide for Large-Scale Benchmarks
+
+To ensure the GPU tensor cores never stall during extensive mathlib4 benchmarking runs, the `AsyncReplayBuffer` capacity must scale linearly with your parallel CPU pipeline workload.
+
+#### 14.1 Capacity Sizing Formula
+Apply this operational rule of thumb to configure your training and evaluation scripts locally:
+
+\[\text{Buffer Capacity} = \text{NUM\_CPU\_WORKERS} \times \text{MAX\_PROOF\_DEPTH} \times 4\]
+
+* **Example Configuration:** Running 8 parallel CPU worker processes (`NUM_CPU_WORKERS=8`) evaluating a maximum proof tree search depth of 50 steps (`MAX_PROOF_DEPTH=50`) requires a minimal local buffer initialization allocation of **1,600 to 2,000 units** to absorb processing latency spikes.
+
+#### 14.2 Local Code Definition
+Users can scale the capacity dynamically inside their local execution scripts when instantiating the memory module:
+
+```python
+# Compute optimal non-blocking capacity requirements
+NUM_CPU_WORKERS = 8
+MAX_PROOF_DEPTH = 50
+BUFFER_CAPACITY = NUM_CPU_WORKERS * MAX_PROOF_DEPTH * 4  # = 1600
+
+# Instantiate the decoupled buffer module
+replay_buffer = AsyncReplayBuffer(capacity=BUFFER_CAPACITY)
+```
+
+#### 14.3 Active GPU Hardware Scalability Rules
+You can dynamically adjust the core model parameters within `ai_prover.py` to seamlessly scale the implementation across different GPU hardware tiers:
+
+* **`keep_ratios=[0.75, 0.50]`**: Your primary lever for dynamic VRAM control. Lower these parameters (e.g., `[0.50, 0.25]`) to enforce aggressive, layer-wise memory saving on smaller consumer-grade cards.
+* **`embed_dim` & `num_heads`**: Scale these parameters upward (e.g., `1024` or `4096`) to benchmark massive representation capacities on professional server clusters.
+* **`max_seq_len`**: Adjust this limit dynamically to easily accommodate ultra-deep formal *mathlib4* proof trees without triggering localized memory overflow.
