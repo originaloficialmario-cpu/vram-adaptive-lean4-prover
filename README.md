@@ -71,3 +71,12 @@ Diese mathematische Formulierung erzeugt ein dynamisches Gleichgewicht (Nash-Equ
 Diese Kombination ist maximal effizient. Sie löst das fundamentale Paradoxon des Deep Learnings: Wie man diskrete Entscheidungen (Token löschen, um VRAM zu sparen) mit kontinuierlicher Optimierung (Backpropagation) verknüpft.
 
 Für ein echtes Multi-GPU-Setup im großen Stil (z. B. mit echten Lean 4 Archiven) ist dieses mathematische Design exakt die Architektur, die verhindert, dass dir der VRAM bei langen mathematischen Beweisbäumen überläuft.
+
+
+---
+
+### 📢 Open Source Notification for Researchers
+
+This hardware-accelerated compression kernel is shared with the formal mathematics and automated theorem proving community as an open contribution. 
+
+CC: @kyngn (Kaiyu Yang / LeanDojo Lead) - This implementation demonstrates a lightweight alternative for sequence compression during deep proof-tree expansion using native unmasked FlashAttention (SDPA). Feel free to review, fork, or critique the architecture.
