@@ -10,60 +10,37 @@ logging.basicConfig(level=logging.INFO)
 # 1. HARDWARE-ACCELERATED DYNAMIC COMPRESSION TRANSFORMER
 # =====================================================================
 class RealVRAMOptimizedTransformer(nn.Module):
-    def __init__(self, vocab_size, embed_dim, num_heads, depth, max_seq_len, num_actions):
-        super().__init__()
-        self.embedding = nn.Embedding(vocab_size, embed_dim)
-        self.pos_embedding = nn.Parameter(torch.randn(1, max_seq_len, embed_dim))
-        
-        # Tokenizer-Effizienz-Kopf (psi)
-        self.pruning_head = nn.Linear(embed_dim, 2)
-        
-        self.depth = depth
-        self.num_heads = num_heads
-        self.head_dim = embed_dim // num_heads
-        
-        # Multi-Head Attention Schichten (theta)
-        self.q_projections = nn.ModuleList([nn.Linear(embed_dim, embed_dim) for _ in range(depth)])
-        self.k_projections = nn.ModuleList([nn.Linear(embed_dim, embed_dim) for _ in range(depth)])
-        self.v_projections = nn.ModuleList([nn.Linear(embed_dim, embed_dim) for _ in range(depth)])
-        self.out_projections = nn.ModuleList([nn.Linear(embed_dim, embed_dim) for _ in range(depth)])
-        
-        # Feed-Forward Netzwerke
-        self.ffn1 = nn.ModuleList([nn.Linear(embed_dim, embed_dim * 4) for _ in range(depth)])
-        self.ffn2 = nn.ModuleList([nn.Linear(embed_dim * 4, embed_dim) for _ in range(depth)])
-        
-        self.ln1 = nn.ModuleList([nn.LayerNorm(embed_dim) for _ in range(depth)])
-        self.ln2 = nn.ModuleList([nn.LayerNorm(embed_dim) for _ in range(depth)])
-        
-        # RL-Ausgabeköpfe (Akteur und Kritiker - phi)
-        self.policy_head = nn.Linear(embed_dim, num_actions)
-        self.value_head = nn.Linear(embed_dim, 1)
-
-    def forward(self, x, temperature=1.0):
+def forward(self, x, temperature=1.0):
         B, T = x.shape  # B=1, T=32
         h = self.embedding(x) + self.pos_embedding[:, :T, :]
         
-        # 1. Gumbel-Softmax für diskrete Entscheidungen (STE aktiv)
+        # 1. Gumbel-Softmax für diskrete Entscheidungen
         logits = self.pruning_head(h) 
         soft_probs = F.gumbel_softmax(logits, tau=temperature, hard=True, dim=-1)
         keep_mask = soft_probs[:, :, 1] # Shape: [B, T] (1.0 oder 0.0)
         
-        # Sicherheitsnetz: Falls alle Token gedroppt wurden, erzwinge das Behalten des ersten Tokens
-        # Dies verhindert mathematische Division-by-Zero Collapses (NaNs)
+        # 2. Autograd-sicheres Sicherheitsnetz (Out-of-place Modifikation)
         if keep_mask.sum() == 0:
-            keep_mask[0, 0] = 1.0
+            fallback = torch.zeros_like(keep_mask)
+            fallback[0, 0] = 1.0
+            # Addition erhält den Gradientenfluss im Gegensatz zur In-Place Zuweisung
+            keep_mask = keep_mask + fallback 
             
-        # 2. ECHTE HARDWARE-ERSPARNIS: Indizes der aktiven Token extrahieren
-        # Da B=1, können wir die Sequenz dynamisch schrumpfen lassen
+        # 3. Indizes der aktiven Token extrahieren
         active_indices = torch.nonzero(keep_mask[0])[:, 0]
         h_active = h[:, active_indices, :] # Shape: [1, T_aktiv, embed_dim]
         T_active = h_active.shape[1]
         
-        # 3. Transformer-Verarbeitung NUR auf den aktiven Token
-        # Da wir unbrauchbare Token physisch gelöscht haben, brauchen wir KEINE attn_mask mehr!
-        # FlashAttention schaltet sich jetzt nativ ein!
+        # 4. CRITICAL FIX: Gradienten-Brücke für den Straight-Through Estimator bauen
+        # keep_mask hat an diesen Indizes den Wert 1.0. Das ändert die Werte nicht, 
+        # aber verknüpft h_active im Autograd-Graphen wieder mit dem pruning_head!
+        mask_active = keep_mask[0, active_indices].unsqueeze(-1).unsqueeze(0)
+        h_active = h_active * mask_active
+        
+        # 5. Transformer-Verarbeitung (Rest bleibt gleich)
         for i in range(self.depth):
             h_norm = self.ln1[i](h_active)
+            # ... Rest deines Attention-Codes ...
             
             q = self.q_projections[i](h_norm).view(B, T_active, self.num_heads, self.head_dim).transpose(1, 2)
             k = self.k_projections[i](h_norm).view(B, T_active, self.num_heads, self.head_dim).transpose(1, 2)
