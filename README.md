@@ -108,3 +108,14 @@ The success of the architecture is evaluated along a dual-axis Pareto-efficiency
 To achieve deterministic high-throughput execution on local hardware environments (such as NVIDIA RTX 30-series GPUs or higher), the pipeline explicitly manages runtime latency asymmetry:
 * **Asynchronous Execution:** The framework detaches the fast, GPU-bound forward/backward passes from the highly variable, CPU-bound latency of the Lean 4 compiler.
 * **Process Orchestration:** Multi-processing is managed utilizing PyTorch's native `spawn` method, creating a strict boundary around the GPU context and protecting the tensor cores from blocking states during formal verification loops.
+
+---
+
+### 🔬 Experimental Setup & Validation Protocols
+
+To guarantee scientific integrity and system stability under production-scale conditions, the architecture relies on the following validation protocols:
+
+* **Hardware-Safety & Stability:** To eliminate the risk of a total information collapse ("Zero-Token-Drop") during dynamic routing phases, a lower capacity boundary of $k \ge 1$ is hard-implemented in every single layer. This ensures that the model retains at least one information carrier at each transformation level, even if the router logits drop extremely low due to convergence constraints.
+* **Proof-Efficiency Metrics:** The success of the architecture is not defined by VRAM savings alone, but by the *Proof-Efficiency Ratio*. This metric directly correlates the success rate per tactic step with the average VRAM utilization per proven lemma, mathematically verifying that the sequence compression does not corrupt the model's core mathematical proving capability.
+* **System Integrity & Asynchrony:** The strict separation of GPU-accelerated optimization and CPU-bound Lean 4 compilation is executed via a spawn-based process orchestration. This effectively prevents the variable latency of the formal proof compiler from bottlenecking the clock rate of the GPU tensor cores or causing idle states during backpropagation.
+* **Reproducibility Standard:** The entire framework is fully optimized for consumer-grade hardware (NVIDIA RTX 30-series or higher). The significant VRAM reduction allows for direct bench-marking against the official *mathlib4* database, making the computational density comparable even under strictly limited physical memory constraints.
