@@ -136,7 +136,7 @@ def run_rigorous_test():
             print(f"   [Zyklus {epoch:02d}] Loss: {total_loss.item():.4f} | Behaltene Token im VRAM: {l_vram.item()*100:.2f}%")
             
     logging.info("✅ TEST 3 bestanden: System läuft absolut konvergent und fehlerfrei im CUDA-Speicher!")
-    print("\n🏁 GLÜCKWUNSCH MARIO! Der Code hat die härteste Prüfung bestanden und ist zu 100% fehlerfrei!")
+    print("\n🏁 GLÜCKWUNSCH! Der Code hat die härteste Prüfung bestanden und ist zu 100% fehlerfrei!")
 
 if __name__ == "__main__":
     run_rigorous_test()
