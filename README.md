@@ -22,3 +22,15 @@ Das System trennt strikt zwischen rechenintensiven Aufgaben auf der GPU und der 
 * Python 3.10+
 * PyTorch (mit CUDA-Unterstützung)
 * Lean 4 & Lake (für die echte Compiler-Anbindung)
+-----------------------------------------------------------------------------------------------
+Der kognitive Kern: vram-adaptive-lean4-prover
+
+AXION OS ist kein statischer Code. Es ist ein lebender Organismus, der auf einem formal verifizierten Logik-Fundament ruht. Unser Core-Repository stellt die Basis für alles, was wir "Intelligenz-native Entwicklung" nennen:
+
+    Proof-of-Logic (ai_prover.py): Wir nutzen einen UltraOptimizedTransformer, der als zentraler Entscheidungs-Kernel fungiert. Hier werden keine Befehle "hart verdrahtet", sondern Wahrscheinlichkeitsfelder für Systemzustände berechnet.
+
+    Asynchrone Inferenz-Pipeline (run_async_pipeline.py): Das AXION-Betriebssystem verwaltet keine klassischen Threads. Es verwaltet "Inferenz-Tasks". Unsere Pipeline ermöglicht es, massive mathematische Beweislast (Lean 4) asynchron auf CPU-Clustern zu verteilen, während die GPU die globale Strategie optimiert.
+
+    Parallele Strategie-Planung (run_parallel_mcts.py): Das ist das "Gehirn" unserer UI/UX. Durch batched MCTS (Monte Carlo Tree Search) antizipiert AXION OS die Anforderungen des Benutzers, noch bevor der Befehl vollständig eingegeben wurde.
+
+Warum dieser Code wichtig ist: Dies ist nicht nur eine Bibliothek; es ist das API für das Denken. Entwickler, die für AXION OS Anwendungen bauen wollen, nutzen nicht mehr sys_call_read(), sondern sie nutzen den BatchedProofSearch-Kern, um ihre Ziele in den logischen Raum des Systems zu integrieren.
