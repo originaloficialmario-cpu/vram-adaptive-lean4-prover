@@ -25,7 +25,7 @@ Das System trennt strikt zwischen rechenintensiven Aufgaben auf der GPU und der 
 -----------------------------------------------------------------------------------------------
 Der kognitive Kern: vram-adaptive-lean4-prover
 
-AXION Engine (AXE) ist kein statischer Code. Es ist ein lebender Organismus, der auf einem formal verifizierten Logik-Fundament ruht. Unser Core-Repository stellt die Basis für alles, was wir "Intelligenz-native Entwicklung" nennen:
+AXION Engine OS (AXE) ist kein statischer Code. Es ist ein lebender Organismus, der auf einem formal verifizierten Logik-Fundament ruht. Unser Core-Repository stellt die Basis für alles, was wir "Intelligenz-native Entwicklung" nennen:
 
     Proof-of-Logic (ai_prover.py): Wir nutzen einen UltraOptimizedTransformer, der als
     zentraler Entscheidungs-Kernel fungiert. Hier werden keine Befehle "hart verdrahtet",
