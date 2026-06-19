@@ -58,5 +58,4 @@ Meine Dienstleistungen:
 Interessiert?
 Wenn du Unterstützung bei der Skalierung deiner formalen Beweisverfahren benötigst, kontaktiere mich gerne für eine unverbindliche technische Einschätzung deines Projekts.
 
-📩 Kontakt: [Deine E-Mail-Adresse einfügen]
-🔗 LinkedIn/Profil: [Link zu deinem Profil einfügen]
+📩 Kontakt: [original.oficial.mario@gmail.com]
